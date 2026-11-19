@@ -202,3 +202,22 @@ PREFIX0.bin, PREFIX1.bin; a shorter file replicates only the first, hot part),
 file mappings), `-D SECS` (warm-up before measuring). New CSV columns:
 `hot_pct`, `hot_access_pct`, `rep_frac`, `disk_read_mb_s`, `majflt_per_s`,
 `mem_limit_gib`.
+
+## Version 4: experiment 6 (finding hot pages automatically)
+
+| Command | What it does | Time |
+|---|---|---|
+| `sudo ./run_exp6.sh` | Correctness check, then part A (plain, known hot set, adaptive under 12 and 10 GiB limits), a learning-curve run, and part B (hot set moves after 20 s) | ~30 min |
+| `python3 plot_timeline.py` | Charts from the per-second timelines: `timeline_learn.png`, `timeline_move.png` | seconds |
+
+It uses `../numa-mmap-replica/data8g.bin` and the hot-10% replica files made
+by experiment 5 in `../numa-mmap-replica-v3/`.
+
+New mode `-m adaptive`: each thread counts 1 in 16 of its reads per socket and
+block; a block whose count reaches `-g` (default 4) is copied into that
+socket's replica area of `-c` % of the file (default 10); a CLOCK sweep evicts
+blocks not read recently once the area is full, and counts are halved every
+second. `-C` compares every adaptive read with the file. Other new options:
+`-s SECS` moves the hot set to the middle of the file, `-o FILE` writes
+per-second throughput. New CSV columns: `promotions_per_s`,
+`replacements_per_s`, `shift_s`.

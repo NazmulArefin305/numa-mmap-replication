@@ -27,11 +27,11 @@ This project targets PaCaR's first limitation and the reassurance the paper atta
 
 Run 1 showed a consistent 1.35–1.49x gain from per-node replicas, with local accesses rising from 50% to 100%. Machine: CloudLab `c220g5`, two Xeon Silver 4114 sockets (2 NUMA nodes, 40 logical CPUs), Ubuntu 24.04, kernel 6.8. Workload: a 2 GiB file, random 4 KiB reads, 2–40 pinned threads split evenly over both sockets, 3 repetitions of 20 s for each of 4 settings. At 40 threads, plain mmap levelled off at 58.3 GiB/s and replicas reached 86.7 GiB/s. Turning NUMA balancing on changed throughput by under 1%.
 
-![What run 1 tested](../figures/experiment_diagram.png)
+![What run 1 tested: plain mmap with the file split across both sockets, against one full replica per socket](../figures/experiment_diagram.png)
 
 Panel A: with plain mmap, each socket reads half its data across the link between sockets, which becomes the bottleneck. Panel B: with one replica per socket, every read stays local, at the cost of twice the memory.
 
-![Run 1 results](../figures/run1_results.png)
+![Run 1 results: read throughput by thread count for the four settings, and the share of local accesses](../figures/run1_results.png)
 
 Left: per-node replicas (blue) pull ahead of all three plain-mmap settings at every thread count; the two spread settings, with and without NUMA balancing, overlap. Right: the replicas serve 100% of reads locally, every mmap setting 50%.
 
@@ -192,7 +192,7 @@ python3 plot_results.py results_8g.csv
 
 The gain held with the four times larger file: replicas were 1.36–1.54x faster than the best plain-mmap setting, the same as or slightly above run 1. H2 holds. Run-to-run spread stayed below 2% except at 8 threads (5.6%).
 
-![Run 2 results, 8 GiB file](../figures/run2_8gib_results.png)
+![Run 2 results, 8 GiB file: read throughput by thread count for the four settings, and the share of local accesses](../figures/run2_8gib_results.png)
 
 | Threads | Best mmap, 8 GiB (GiB/s) | Replicas, 8 GiB (GiB/s) | Speed-up, 8 GiB | Speed-up, 2 GiB (run 1) |
 | --- | --- | --- | --- | --- |
@@ -280,7 +280,7 @@ This is the stretch goal: it adds PaCaR's main/twin rule to the mapped-file repl
 
 Replicas keep a clear lead while writes are rare, but for mapped files the crossover comes at 87–90% reads, much earlier than PaCaR's 65%. H4a and H4c hold; H4b holds only in part: there is a crossover, but well above the predicted 50–75%.
 
-![Experiment 4: replica speed-up against the share of reads](../figures/exp4_speedup.png)
+![Replica speed-up over plain mmap against the share of reads, for 16 and 40 threads, with the break-even line and PaCaR's 65% point marked](../figures/exp4_speedup.png)
 
 | Reads | Speed-up, 16 threads | Speed-up, 40 threads | Replica local accesses | Twin refreshes, 40 threads (millions/s) |
 | --- | --- | --- | --- | --- |
@@ -341,7 +341,7 @@ This experiment tests PaCaR's second limitation and the fix the paper proposes f
 
 Limitation 2 is real and the paper's proposed fix works. Full replicas collapsed to 8–17 times slower than plain mmap once they no longer fit in memory, while replicas of only the hot 10% kept a 1.40x gain at every limit. H5a and H5c hold; H5b holds from 12 GiB down, but not at 16 GiB, where full replicas still just fitted.
 
-![Experiment 5: throughput per memory limit](../figures/exp5_memory.png)
+![Experiment 5: throughput per memory limit for plain mmap, full replicas, and replicas of the hot 10% and 25%](../figures/exp5_memory.png)
 
 | Memory limit | Plain mmap (GiB/s) | Full replicas | Hot 10% replicas | Hot 25% replicas |
 | --- | --- | --- | --- | --- |
@@ -356,6 +356,105 @@ Speed-ups are against plain mmap at the same limit; each value is the mean of 2 
 - **Full replicas need twice the memory, and the cliff is steep.** At 16 GiB, exactly their size, they still ran at 1.46x with a trickle of disk reads, because the hot data stayed cached. At 12 GiB the evicted cold pages had to come back from the SSD, which levelled off at about 275 MB/s (about 67,000 reads of 4 KiB per second) and capped the whole program.
 - **Replicating only the hot part keeps most of the gain for a fraction of the memory.** The hot 10% replicas used 1.6 GiB of extra memory instead of 8 GiB and kept 83% of full replication's gain (1.40x against 1.48x when everything fits). The hot 25% version was slightly faster but began touching the disk at 10 GiB.
 - **This is an upper bound for selective replication.** The hot blocks were known in advance; a real system such as PaCaR would have to discover them by counting accesses, which costs time and memory and may pick the wrong pages when the pattern shifts.
+
+## Experiment 6: finding the hot pages automatically
+
+Experiment 5 replicated a hot set that was known in advance. This experiment removes that shortcut: the program discovers hot pages itself by counting accesses, as PaCaR would have to, and must follow the hot set when it moves.
+
+**Question.** How close does automatic hot-page detection come to the known-hot-set best case, how fast does it learn, and does it recover when the hot set moves?
+
+**Design (new `adaptive` mode).**
+
+| Part | How it works |
+| --- | --- |
+| Counting | Each thread counts 1 in 16 of its reads, in a per-socket counter for each 4 KiB block |
+| Promotion | When a block's count reaches 4, it is copied into that socket's replica area, as long as there is room |
+| Replica area | Fixed at 10% of the file per socket, in memory bound to that socket |
+| Replacement | When the area is full, a CLOCK sweep evicts blocks that have not been read recently |
+| Ageing | All counts are halved every second, so old popularity fades and a moved hot set can take over |
+| Safety | A version number per replica slot makes a read that overlaps a replacement fall back to the shared file, never return the wrong block |
+
+**Part A: steady hot set.** The same workload and 10 GiB memory limit as experiment 5: plain mmap, the known-hot-set replicas, and adaptive replicas, 40 threads, 2 runs each of 30 s after a 10 s warm-up. One extra adaptive run records throughput every second from a cold start, to show how fast it learns.
+
+**Part B: moving hot set.** A 60 s run in which the hot 10% moves to the middle of the file after 20 s, with throughput recorded every second, for all three settings.
+
+**Hypotheses.** H6a: in part A, adaptive replicas reach at least 90% of the known-hot-set throughput. H6b: they learn within a few seconds. H6c: in part B, the known-hot-set replicas fall to about plain-mmap speed after the move, while adaptive replicas dip and then recover within a few seconds.
+
+**Metrics.** Throughput, sampled local share, promotions and replacements per second, and a per-second throughput timeline.
+
+**Time.** About an hour to write the code, then about 20 minutes on the machine.
+
+### Result of part A: steady hot set (19 Nov, 20:41–21:05, `run_exp6.sh`)
+
+With no advance knowledge, adaptive replicas ran at 97% of the known-hot-set speed and kept 89% of its gain over plain mmap, under both memory limits and with no disk reads. H6a holds.
+
+| Memory limit | Plain mmap (GiB/s) | Known hot set (GiB/s) | Adaptive replicas (GiB/s) | Local accesses: known / adaptive |
+| --- | --- | --- | --- | --- |
+| 12 GiB | 59.48 | 83.56 (1.40x) | 81.02 (1.36x) | 95.0% / 92.2% |
+| 10 GiB | 59.49 | 83.59 (1.41x) | 81.00 (1.36x) | 95.0% / 92.2% |
+
+Each value is the mean of 2 runs of 30 s after a 10 s warm-up; runs differed by under 0.05 GiB/s.
+
+- **The correctness check passed.** In a 10 s run comparing every adaptive read with the file, 0 reads returned wrong data.
+- **It settles.** In steady state only about 62 blocks per second were promoted and 1 replaced, so after learning the counting costs almost nothing.
+- **It catches most, not all, of the hot set.** A local share of 92.2% means about 84% of reads were served from a local replica, against 90% for the known hot set. The tuning runs below show why: some hot blocks never reach the promotion threshold before their counts are halved, not a shortage of room in the replica area.
+- **Memory stayed within the limit.** The adaptive area adds 1.6 GiB of memory bound to the sockets, the same as the known-hot-set copies, and no run read from disk even at 10 GiB.
+- **Learning curve (20 s from a cold start):** 53.9 GiB/s in the first second, 77.1 at 5 s, 80.9 at 10 s, 81.0 from 13 s on; promotions fell from about 95,000 per second at the peak to under 10 per second.
+
+### Tuning the replica area and the threshold (19 Nov, 22:00–22:14)
+
+A larger replica area changed nothing, and a higher threshold made things worse, so the remaining gap comes from how quickly blocks are counted, not from the size of the area. Both guesses in part A were wrong: the cause was not cold blocks crowding out hot ones.
+
+| Replica area | Threshold | Throughput (GiB/s) | Local accesses | Promotions per second, steady state |
+| --- | --- | --- | --- | --- |
+| 10% | 4 | 80.98 | 92.2% | 63 |
+| 12% | 4 | 81.03 | 92.2% | 62 |
+| 15% | 4 | 81.04 | 92.2% | 62 |
+| 10% | 6 | 80.19 | 87.0% | 4,349 |
+| 12% | 6 | 80.16 | 87.0% | 4,351 |
+| 10% | 8 | 67.91 | 65.3% | 8,132 |
+
+All runs: 12 GiB memory limit, 40 threads, 2 runs of 30 s after a 10 s warm-up each; runs differed by under 0.15 GiB/s, and at most 1 block per second was replaced in any of them.
+
+- **The area was never full.** Replacements stayed at 0–1 per second even at 10%, so a larger area could not help.
+- **The threshold is the limit.** Each hot block gets about 45 reads per second on each socket, so with 1 in 16 counted it collects about 3 counted reads per second, and its count is halved every second. A threshold of 4 is reached by most hot blocks, 6 by fewer, and 8 rarely, which matches the falling local share. The steady trickle of promotions at thresholds 6 and 8 is hot blocks that only occasionally cross the line.
+- **So the threshold must match the access rate and the decay.** A lower threshold, more frequent counting or slower decay should promote more of the hot set, at the cost of also promoting more cold blocks. The follow-up run below tests thresholds 2 and 3.
+
+### Lower thresholds (19 Nov, 22:18–22:25)
+
+Lowering the threshold raised locality but not throughput, so the last 3% gap to the known hot set is the cost of the replica lookup itself, not missed hot blocks. A threshold of 3 is the best setting tested.
+
+| Replica area | Threshold | Throughput (GiB/s) | Local accesses | Promotions per second | Replacements per second |
+| --- | --- | --- | --- | --- | --- |
+| 10% | 2 | 80.71 | 93.6% | 9,471 | 9,471 |
+| 10% | 3 | 81.02 | 93.5% | 142 | 142 |
+| 10% | 4 (earlier run) | 80.98 | 92.2% | 63 | 0–1 |
+| Known hot set (part A) | — | 83.56 | 95.0% | — | — |
+
+Same conditions as the tuning runs above: 12 GiB limit, 40 threads, 2 runs of 30 s after a 10 s warm-up.
+
+- **Threshold 3 catches more of the hot set without churn.** Locality rose from 92.2% to 93.5%, so about 87% of reads were served from a local replica instead of 84%, with only 142 promotions per second.
+- **Threshold 2 is too eager.** Cold blocks now pass it as well, the area fills, and about 9,500 blocks per second are promoted and evicted again. Locality is no better than at 3, and throughput is slightly lower (80.71 GiB/s).
+- **Throughput did not follow locality.** Better locality at thresholds 2 and 3 left throughput at about 81 GiB/s. The remaining gap of about 2.6 GiB/s to the known hot set is therefore most likely the per-read bookkeeping: looking up which slot holds a block and checking its version. This is consistent with the 15–20% overhead seen on the one-socket test machine, where there was no locality gain to offset it. Making the lookup cheaper, for example with a smaller map that stays in the CPU caches, is the natural next step; it was not tried.
+
+### Result of part B: moving hot set (19 Nov, \~21:15, `run_exp6.sh`)
+
+Automatic detection adapts where a fixed choice cannot. When the hot 10% moved after 20 s, the known-hot-set replicas fell to plain-mmap speed and stayed there, while adaptive replicas dropped for a moment and were back at full speed within 6–8 s. H6b and H6c hold.
+
+![Experiment 6 part B: throughput per second for plain mmap, known hot set and adaptive replicas; the hot set moves at 20 s](../figures/exp6_moving.png)
+
+| Setting | Seconds 10–20, before the move (GiB/s) | Seconds 31–60, after the move (GiB/s) | Whole 60 s run (GiB/s) |
+| --- | --- | --- | --- |
+| Plain mmap | 59.49 | 59.47 | 59.19 |
+| Known hot set, fixed in advance | 83.57 | 59.80 | 67.56 |
+| Adaptive replicas | 81.01 | 81.19 | 78.48 |
+
+Each value is the mean of 2 runs, which differed by under 0.1 GiB/s in every second.
+
+- **Learning is fast.** From a cold start, adaptive replicas reached 90% of their plateau after 4 s, 95% after 5 s and 99% after 8 s. After the move they did the same in 4, 6 and 8 s. Promotions peaked at about 95,000 per second and then fell to almost zero, so the counting settles once the hot set is in place.
+- **The fixed choice is only as good as the guess.** Before the move, the known hot set was 3% faster than adaptive replicas. After it, it was 26% slower, no better than having no replicas, because the data it had copied was no longer the data being read.
+- **The price of adapting is small.** In steady state adaptive replicas ran at 97% of the known-hot-set speed, the 3% being the cost of counting reads and looking up which slot holds a block.
+- **Every setting dips just after the move**, plain mmap included (to about 54 GiB/s for 1–2 s). The newly hot pages first have to be loaded into the CPU caches and address-translation caches; this is a likely explanation, not one measured here.
 
 ## How each experiment bears on PaCaR
 
@@ -375,7 +474,7 @@ What none of these test: PaCaR's kernel implementation itself, machines with mor
 
 Experiments 1a, 1c and 2 start now because they need no new code; the new code for 1b, 3 and 4 is written during experiment 2's 45 minutes.
 
-_Planned order on 19 Nov (Riyadh time): experiments 1a and 1c 15:05–15:20, experiment 2 15:20–16:05, new code written 15:05–16:35, experiments 1b and 3 16:40–17:20, experiment 4 17:25–18:10, copy results 18:10–18:25; machine expiry 21:33 (later extended for experiment 5)._
+_Planned order on 19 Nov (Riyadh time): experiments 1a and 1c 15:05–15:20, experiment 2 15:20–16:05, new code written 15:05–16:35, experiments 1b and 3 16:40–17:20, experiment 4 17:25–18:10, copy results 18:10–18:25; machine expiry 21:33 (later extended for experiments 5 and 6)._
 
 The plan leaves about three hours of margin before the machine expires at 21:33. If code takes longer than planned, click **Extend** on the experiment page before 21:00, or drop experiment 4 and keep it for a later session on a fresh machine.
 

@@ -24,6 +24,13 @@
  *            file is shorter than the data file, only its first part (the hot
  *            blocks) is replicated and the rest is read from the shared file.
  *
+ *   adaptive Replicas chosen automatically (experiment 6). Each thread counts
+ *            1 in 16 of its reads per socket and block; a block whose count
+ *            reaches the threshold (-g, default 4) is copied into that socket's
+ *            replica area of -c PCT % of the file (default 10). When the area
+ *            is full, a CLOCK sweep evicts blocks not read recently. Counts are
+ *            halved every second. All other reads go to the shared mapping.
+ *
  *   anon     Positive control for NUMA balancing. Anonymous memory, filled by
  *            a thread on the first node; use -n 1 to run every reader on the
  *            second node. With NUMA balancing on, Linux should move the pages
@@ -44,6 +51,9 @@
  *   -A       advise the kernel that file mappings are read randomly (no
  *            read-ahead), so disk reads reflect real misses.
  *   -D SECS  run the workload this long before measuring (warm-up).
+ *   -s SECS  move the hot set to the middle of the file this long after the
+ *            start (seconds counted from the start, warm-up included).
+ *   -o FILE  write throughput for every second of the run to FILE (CSV).
  *   -S N     sample locality every N operations per thread (default 4096,
  *            0 = off): the thread records its node and the node of the page
  *            it just accessed. Works for pinned and unpinned threads.
@@ -108,7 +118,7 @@ static size_t file_size;
 static size_t block = 4096;
 static size_t nblocks;
 
-enum { M_SHARED, M_REPLICA, M_ANON, M_FILEREP };
+enum { M_SHARED, M_REPLICA, M_ANON, M_FILEREP, M_ADAPTIVE };
 static int mode = M_SHARED;
 static int read_pct = 100;
 static int writable;          /* file mapped read-write */
@@ -124,6 +134,21 @@ static int hot_pct, hot_access;   /* -k H:A */
 static size_t hot_blocks;
 static int rand_advice;           /* -A */
 static double warm_secs;          /* -D */
+static double shift_secs;         /* -s */
+static const char *timeline_path; /* -o */
+static _Atomic size_t hot_base;   /* first block of the hot set */
+
+/* adaptive mode */
+static int cap_pct = 10, threshold = 4;
+static size_t cap_slots;
+static unsigned char *acnt[MAX_NODES];            /* per-block counters */
+static _Atomic int32_t *amap[MAX_NODES];          /* block -> slot, -1 none, -2 pending */
+static unsigned char *aslots[MAX_NODES];          /* replica area */
+static _Atomic int64_t *aslot_blk[MAX_NODES];     /* slot -> block */
+static _Atomic uint32_t *aslot_ver[MAX_NODES];    /* slot version, odd = changing */
+static unsigned char *aslot_ref[MAX_NODES];       /* CLOCK reference bits */
+static _Atomic size_t anext[MAX_NODES], ahand[MAX_NODES];
+static _Atomic uint64_t promotions, replacements;
 
 static unsigned char *region[MAX_NODES]; /* what node k's threads read */
 static unsigned char *main_map;           /* the file mapping (main copy) */
@@ -493,6 +518,143 @@ static const unsigned char *rep_read(struct worker *w, int k, size_t blk, unsign
     }
 }
 
+/* ---------- adaptive replication (experiment 6) ---------- */
+
+static inline uint64_t y_sample(uint64_t x)
+{
+    return (x * 0x9E3779B97F4A7C15ULL) >> 58;
+}
+
+static void *alloc_on(size_t len, int k)
+{
+    void *r = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r == MAP_FAILED)
+        die("mmap (adaptive)");
+    madvise(r, len, MADV_NOHUGEPAGE);
+    bind_to_node(r, len, k);
+    return r;
+}
+
+static void adaptive_setup(void)
+{
+    cap_slots = nblocks * cap_pct / 100;
+    if (cap_slots == 0)
+        cap_slots = 1;
+    for (int k = 0; k < nnodes; k++) {
+        acnt[k] = alloc_on(nblocks, k);
+        amap[k] = alloc_on(nblocks * sizeof(int32_t), k);
+        aslots[k] = alloc_on(cap_slots * block, k);
+        aslot_blk[k] = alloc_on(cap_slots * sizeof(int64_t), k);
+        aslot_ver[k] = alloc_on(cap_slots * sizeof(uint32_t), k);
+        aslot_ref[k] = alloc_on(cap_slots, k);
+        for (size_t i = 0; i < nblocks; i++)
+            atomic_init(&amap[k][i], -1);
+        for (size_t i = 0; i < cap_slots; i++) {
+            atomic_init(&aslot_blk[k][i], -1);
+            atomic_init(&aslot_ver[k][i], 0);
+        }
+        memset(acnt[k], 0, nblocks);
+        memset(aslot_ref[k], 0, cap_slots);
+        memset(aslots[k], 0, cap_slots * block); /* fault the area in on node k */
+    }
+}
+
+/* CLOCK: find a slot whose block was not read recently; returns it locked
+ * (version odd), or (size_t)-1 if none found in two sweeps. */
+static size_t find_victim(int k)
+{
+    for (size_t tries = 0; tries < 2 * cap_slots; tries++) {
+        size_t h = atomic_fetch_add_explicit(&ahand[k], 1, memory_order_relaxed) % cap_slots;
+        if (aslot_ref[k][h]) {
+            aslot_ref[k][h] = 0;
+            continue;
+        }
+        uint32_t v = atomic_load_explicit(&aslot_ver[k][h], memory_order_acquire);
+        if (v & 1)
+            continue;
+        if (!atomic_compare_exchange_strong_explicit(&aslot_ver[k][h], &v, v + 1,
+                memory_order_acq_rel, memory_order_relaxed))
+            continue;
+        int64_t ob = atomic_load_explicit(&aslot_blk[k][h], memory_order_relaxed);
+        if (ob >= 0) {
+            int32_t e = (int32_t)h;
+            atomic_compare_exchange_strong_explicit(&amap[k][ob], &e, -1,
+                memory_order_acq_rel, memory_order_relaxed);
+            atomic_fetch_add_explicit(&replacements, 1, memory_order_relaxed);
+        }
+        return h;
+    }
+    return (size_t)-1;
+}
+
+static void try_promote(int k, size_t blk, const unsigned char *data)
+{
+    int32_t e = -1;
+    if (!atomic_compare_exchange_strong_explicit(&amap[k][blk], &e, -2,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;
+    size_t slot = atomic_fetch_add_explicit(&anext[k], 1, memory_order_relaxed);
+    if (slot < cap_slots) {
+        atomic_fetch_add_explicit(&aslot_ver[k][slot], 1, memory_order_acq_rel); /* -> odd */
+    } else {
+        slot = find_victim(k);
+        if (slot == (size_t)-1) {
+            atomic_store_explicit(&amap[k][blk], -1, memory_order_release);
+            return;
+        }
+    }
+    memcpy(aslots[k] + slot * block, data, block);
+    atomic_store_explicit(&aslot_blk[k][slot], (int64_t)blk, memory_order_relaxed);
+    aslot_ref[k][slot] = 1;
+    atomic_fetch_add_explicit(&aslot_ver[k][slot], 1, memory_order_release); /* -> even */
+    atomic_store_explicit(&amap[k][blk], (int32_t)slot, memory_order_release);
+    acnt[k][blk] = 0;
+    atomic_fetch_add_explicit(&promotions, 1, memory_order_relaxed);
+}
+
+static const unsigned char *adaptive_read(int k, size_t blk, unsigned char *dst, int sampled)
+{
+    int32_t s = atomic_load_explicit(&amap[k][blk], memory_order_acquire);
+    if (s >= 0) {
+        uint32_t v1 = atomic_load_explicit(&aslot_ver[k][s], memory_order_acquire);
+        if (!(v1 & 1) &&
+            atomic_load_explicit(&aslot_blk[k][s], memory_order_relaxed) == (int64_t)blk) {
+            const unsigned char *src = aslots[k] + (size_t)s * block;
+            memcpy(dst, src, block);
+            atomic_thread_fence(memory_order_acquire);
+            if (atomic_load_explicit(&aslot_ver[k][s], memory_order_relaxed) == v1) {
+                if (sampled)
+                    aslot_ref[k][s] = 1;
+                return src;
+            }
+        }
+    }
+    const unsigned char *src = main_map + blk * block;
+    memcpy(dst, src, block);
+    if (sampled && s == -1) {
+        unsigned c = acnt[k][blk];
+        if (c < 255)
+            acnt[k][blk] = (unsigned char)(c + 1);
+        if (c + 1 >= (unsigned)threshold)
+            try_promote(k, blk, dst);
+    }
+    return src;
+}
+
+/* Halve every counter once a second so old popularity fades. */
+static void *decay_main(void *p)
+{
+    (void)p;
+    while (!atomic_load_explicit(&stop_flag, memory_order_relaxed)) {
+        struct timespec ts = {1, 0};
+        nanosleep(&ts, NULL);
+        for (int k = 0; k < nnodes; k++)
+            for (size_t i = 0; i < nblocks; i++)
+                acnt[k][i] >>= 1;
+    }
+    return NULL;
+}
+
 /* ---------- measured workload ---------- */
 
 static void *worker_main(void *p)
@@ -519,13 +681,22 @@ static void *worker_main(void *p)
             size_t blk;
             if (hot_blocks) {
                 uint64_t y = x * 0x2545F4914F6CDD1DULL;
+                size_t hb = atomic_load_explicit(&hot_base, memory_order_relaxed);
                 blk = ((int)((y >> 33) % 100) < hot_access)
-                    ? x % hot_blocks : hot_blocks + x % (nblocks - hot_blocks);
+                    ? hb + x % hot_blocks
+                    : hb + hot_blocks + x % (nblocks - hot_blocks);
+                if (blk >= nblocks)
+                    blk -= nblocks;
             } else {
                 blk = x % nblocks;
             }
             int is_read = read_pct >= 100 || (int)((x >> 40) % 100) < read_pct;
-            if (rw_replica) {
+            if (mode == M_ADAPTIVE) {
+                last = adaptive_read(cur, blk, buf, ((y_sample(x)) & 15) == 0);
+                if (check && memcmp(buf, main_map + blk * block, block) != 0)
+                    w->check_errors++;
+                reads++;
+            } else if (rw_replica) {
                 if (is_read) {
                     last = rep_read(w, cur, blk, buf);
                     if (check)
@@ -648,6 +819,7 @@ static void usage(const char *prog)
         "      replica = one copy per NUMA node (with -r < 100: main/twin protocol)\n"
         "      anon    = anonymous memory filled on node 0 (NUMA balancing control)\n"
         "      filerep = evictable file replicas, one per node (-R PREFIX)\n"
+        "      adaptive = replicas of automatically detected hot blocks\n"
         "  -w  shared mode: who loads the file, spread (default) or single\n"
         "  -r  share of operations that are reads, 0-100 (default 100)\n"
         "  -u  do not pin threads      -n NODE  pin every thread to that node\n"
@@ -657,6 +829,10 @@ static void usage(const char *prog)
         "  -R  filerep: replica files are PREFIX0.bin, PREFIX1.bin, ...\n"
         "  -k  H:A  the first H%% of blocks get A%% of accesses   -A  random-access advice\n"
         "  -D  warm-up seconds before measuring\n"
+        "  -s  move the hot set to the middle of the file after SECS\n"
+        "  -o  write per-second throughput to FILE\n"
+        "  -c  adaptive: replica area per node, %% of the file (default 10)\n"
+        "  -g  adaptive: promotion threshold in sampled reads (default 4)\n"
         "  -e  evict the file from the page cache first\n"
         "  -F  testing only: pretend the machine has N NUMA nodes\n"
         "  -H  print the CSV header and exit\n", prog);
@@ -669,7 +845,7 @@ int main(int argc, char **argv)
     int nthreads = 0, evict = 0, opt;
     double seconds = 20;
 
-    while ((opt = getopt(argc, argv, "f:m:w:t:d:b:r:un:WPCS:eF:HR:k:AD:")) != -1) {
+    while ((opt = getopt(argc, argv, "f:m:w:t:d:b:r:un:WPCS:eF:HR:k:AD:s:o:c:g:")) != -1) {
         switch (opt) {
         case 'f': file_path = optarg; break;
         case 'm': mode_s = optarg; break;
@@ -693,13 +869,18 @@ int main(int argc, char **argv)
             break;
         case 'A': rand_advice = 1; break;
         case 'D': warm_secs = atof(optarg); break;
+        case 's': shift_secs = atof(optarg); break;
+        case 'o': timeline_path = optarg; break;
+        case 'c': cap_pct = atoi(optarg); break;
+        case 'g': threshold = atoi(optarg); break;
         case 'F': fake_nodes = atoi(optarg); break;
         case 'H':
             printf("mode,warm,numa_balancing,threads,nodes,file_mb,block,seconds,"
                    "gib_per_s,mops_per_s,local_before,local_after,setup_s,"
                    "pinned,read_pct,writable,sampled_local,node_changes_per_thread_s,"
                    "refreshes_per_s,retries_per_s,check_errors,"
-                   "hot_pct,hot_access_pct,rep_frac,disk_read_mb_s,majflt_per_s,mem_limit_gib\n");
+                   "hot_pct,hot_access_pct,rep_frac,disk_read_mb_s,majflt_per_s,mem_limit_gib,"
+                   "promotions_per_s,replacements_per_s,shift_s\n");
             return 0;
         default: usage(argv[0]);
         }
@@ -708,14 +889,19 @@ int main(int argc, char **argv)
     else if (strcmp(mode_s, "replica") == 0) mode = M_REPLICA;
     else if (strcmp(mode_s, "anon") == 0) mode = M_ANON;
     else if (strcmp(mode_s, "filerep") == 0) mode = M_FILEREP;
+    else if (strcmp(mode_s, "adaptive") == 0) mode = M_ADAPTIVE;
     else usage(argv[0]);
     int single = strcmp(warm, "single") == 0;
     if (!file_path || (!single && strcmp(warm, "spread") != 0) || block < 64 ||
         block % 8 != 0 || fake_nodes < 0 || fake_nodes > MAX_NODES || seconds <= 0 ||
         read_pct < 0 || read_pct > 100 || (unpinned && all_on >= 0))
         usage(argv[0]);
-    if (read_pct < 100 && (mode == M_ANON || mode == M_FILEREP)) {
+    if (read_pct < 100 && (mode == M_ANON || mode == M_FILEREP || mode == M_ADAPTIVE)) {
         fprintf(stderr, "error: %s mode is read-only\n", mode_s);
+        return 2;
+    }
+    if (cap_pct <= 0 || cap_pct > 100 || threshold < 1 || threshold > 255) {
+        fprintf(stderr, "error: -c must be 1-100 and -g 1-255\n");
         return 2;
     }
     if (mode == M_FILEREP && !rep_prefix) {
@@ -725,8 +911,8 @@ int main(int argc, char **argv)
     rw_replica = (mode == M_REPLICA && (read_pct < 100 || force_proto));
     if (read_pct < 100 || rw_replica)
         writable = 1;
-    if (check && !rw_replica)
-        fprintf(stderr, "note: -C only has an effect in replica mode with writes\n");
+    if (check && !rw_replica && mode != M_ADAPTIVE)
+        fprintf(stderr, "note: -C only has an effect in replica mode with writes and in adaptive mode\n");
 
     page_size = sysconf(_SC_PAGESIZE);
     discover_nodes();
@@ -761,7 +947,17 @@ int main(int argc, char **argv)
 
     /* ----- set-up ----- */
     double t0 = now_sec();
-    if (mode == M_FILEREP) {
+    if (mode == M_ADAPTIVE) {
+        main_map = mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (main_map == MAP_FAILED)
+            die("mmap file");
+        run_setup_threads(warm_shared, 0, single ? 1 : nnodes);
+        if (rand_advice)
+            madvise(main_map, file_size, MADV_RANDOM);
+        adaptive_setup();
+        for (int k = 0; k < nnodes; k++)
+            region[k] = main_map;
+    } else if (mode == M_FILEREP) {
         nrep_blocks = nblocks;
         int rep_fd[MAX_NODES];
         for (int k = 0; k < nnodes; k++) {
@@ -837,7 +1033,7 @@ int main(int argc, char **argv)
     int threads_on_node[MAX_NODES] = {0};
     for (int i = 0; i < nthreads; i++)
         threads_on_node[all_on >= 0 ? all_on : i % nnodes]++;
-    int even = !unpinned && all_on < 0 && !rw_replica && mode != M_FILEREP;
+    int even = !unpinned && all_on < 0 && !rw_replica && mode != M_FILEREP && mode != M_ADAPTIVE;
     double local_before = even ? local_ratio(threads_on_node, nthreads) : -1;
     if (mode == M_SHARED && fake_nodes == 0) {
         long dist[MAX_NODES] = {0}, total = 0;
@@ -861,26 +1057,85 @@ int main(int argc, char **argv)
         if (pthread_create(&th[i], NULL, worker_main, &ws[i]) != 0)
             die("pthread_create");
     }
-    pthread_barrier_wait(&start_barrier);
-    if (warm_secs > 0) {
-        struct timespec wt = { (time_t)warm_secs, (long)((warm_secs - (time_t)warm_secs) * 1e9) };
-        nanosleep(&wt, NULL);
+    pthread_t decay_th;
+    if (mode == M_ADAPTIVE && pthread_create(&decay_th, NULL, decay_main, NULL) != 0)
+        die("pthread_create decay");
+    FILE *tl = NULL;
+    if (timeline_path) {
+        tl = fopen(timeline_path, "w");
+        if (!tl)
+            die(timeline_path);
+        fprintf(tl, "t_s,gib_per_s,mops_per_s,promotions_per_s,replacements_per_s,hot_base_block\n");
     }
-    uint64_t ops0 = 0;
-    for (int i = 0; i < nthreads; i++)
-        ops0 += atomic_load_explicit(&ws[i].live_ops, memory_order_relaxed);
-    long long io0 = read_io_bytes();
-    long maj0 = major_faults();
-    double t1 = now_sec();
-    struct timespec ts = { (time_t)seconds, (long)((seconds - (time_t)seconds) * 1e9) };
-    nanosleep(&ts, NULL);
-    uint64_t ops1 = 0;
-    for (int i = 0; i < nthreads; i++)
-        ops1 += atomic_load_explicit(&ws[i].live_ops, memory_order_relaxed);
-    long long io1 = read_io_bytes();
-    long maj1 = major_faults();
-    double elapsed = now_sec() - t1;
+    pthread_barrier_wait(&start_barrier);
+    double t0r = now_sec(), total = warm_secs + seconds;
+    uint64_t ops0 = 0, ops1 = 0, prev_ops = 0, prev_pro = 0, prev_rep = 0;
+    uint64_t pro0 = 0, rep0 = 0, pro1 = 0, rep1 = 0;
+    long long io0 = -1, io1 = -1;
+    long maj0 = 0, maj1 = 0;
+    double t1 = t0r, elapsed = 0, prev_t = 0;
+    int started = 0, shifted = 0;
+#define SUM_OPS(dst) do { dst = 0; for (int i_ = 0; i_ < nthreads; i_++) \
+        dst += atomic_load_explicit(&ws[i_].live_ops, memory_order_relaxed); } while (0)
+    /* points in time (seconds from the start) where something must happen */
+    double next = 1.0;
+    for (;;) {
+        double target = next;
+        if (!started && warm_secs > 0 && warm_secs < target)
+            target = warm_secs;
+        if (!shifted && shift_secs > 0 && shift_secs < target)
+            target = shift_secs;
+        if (target > total)
+            target = total;
+        if (!started && warm_secs <= 0)
+            target = 0;
+        double wait = t0r + target - now_sec();
+        if (wait > 0) {
+            struct timespec w = { (time_t)wait, (long)((wait - (time_t)wait) * 1e9) };
+            nanosleep(&w, NULL);
+        }
+        double el = now_sec() - t0r;
+        if (!started && el + 1e-9 >= warm_secs) {
+            SUM_OPS(ops0);
+            pro0 = atomic_load(&promotions);
+            rep0 = atomic_load(&replacements);
+            io0 = read_io_bytes();
+            maj0 = major_faults();
+            t1 = now_sec();
+            started = 1;
+        }
+        if (!shifted && shift_secs > 0 && el + 1e-9 >= shift_secs) {
+            size_t nb = (nblocks / 2) - (nblocks / 2) % 512;
+            atomic_store(&hot_base, nb);
+            shifted = 1;
+        }
+        if (tl && el + 1e-9 >= next) {
+            uint64_t o, pr = atomic_load(&promotions), rp = atomic_load(&replacements);
+            SUM_OPS(o);
+            double dt = el - prev_t;
+            fprintf(tl, "%.1f,%.4f,%.4f,%.0f,%.0f,%zu\n", el,
+                    (double)(o - prev_ops) * block / dt / (1UL << 30),
+                    (o - prev_ops) / dt / 1e6, (pr - prev_pro) / dt, (rp - prev_rep) / dt,
+                    (size_t)atomic_load(&hot_base));
+            fflush(tl);
+            prev_ops = o; prev_pro = pr; prev_rep = rp; prev_t = el;
+        }
+        if (el + 1e-9 >= next)
+            next += 1.0;
+        if (el + 1e-9 >= total)
+            break;
+    }
+    SUM_OPS(ops1);
+    pro1 = atomic_load(&promotions);
+    rep1 = atomic_load(&replacements);
+    io1 = read_io_bytes();
+    maj1 = major_faults();
+    elapsed = now_sec() - t1;
     atomic_store(&stop_flag, 1);
+    if (tl)
+        fclose(tl);
+    if (mode == M_ADAPTIVE)
+        pthread_join(decay_th, NULL);
     uint64_t ops = ops1 - ops0, refreshes = 0, retries = 0, errors = 0, changes = 0;
     uint64_t samples = 0, samples_local = 0;
     for (int i = 0; i < nthreads; i++) {
@@ -900,7 +1155,10 @@ int main(int argc, char **argv)
     double changes_s = (double)changes / nthreads / elapsed;
     int nb = read_numa_balancing();
     double multiplier = (mode == M_REPLICA) ? nnodes + (rw_replica ? 1 : 0) : 1;
-    double rep_frac = mode == M_REPLICA ? 1.0 : 0.0;
+    double rep_frac = mode == M_REPLICA ? 1.0 : (mode == M_ADAPTIVE ? cap_pct / 100.0 : 0.0);
+    if (mode == M_ADAPTIVE)
+        multiplier = 1.0 + nnodes * cap_pct / 100.0;
+    double pro_s = (pro1 - pro0) / elapsed, rep_s = (rep1 - rep0) / elapsed;
     if (mode == M_FILEREP) {
         rep_frac = (double)nrep_blocks / nblocks;
         multiplier = nnodes * rep_frac + (nrep_blocks < nblocks ? 1.0 : 0.0);
@@ -926,6 +1184,9 @@ int main(int argc, char **argv)
         fprintf(stderr, ", check errors %llu", (unsigned long long)errors);
     if (mode == M_FILEREP)
         fprintf(stderr, ", %.0f%% replicated", 100 * rep_frac);
+    if (mode == M_ADAPTIVE)
+        fprintf(stderr, ", area %d%%, %.0f promotions/s, %.0f replacements/s, %llu promoted in all",
+                cap_pct, pro_s, rep_s, (unsigned long long)pro1);
     if (disk_mb_s > 0.05)
         fprintf(stderr, ", disk reads %.1f MB/s", disk_mb_s);
     if (limit > 0)
@@ -934,7 +1195,7 @@ int main(int argc, char **argv)
             (double)file_size * multiplier / (1 << 20));
 
     printf("%s,%s,%d,%d,%d,%.0f,%zu,%.2f,%.4f,%.4f,%.4f,%.4f,%.2f,%s,%d,%d,%.4f,%.4f,%.4f,%.4f,%llu,"
-           "%d,%d,%.4f,%.2f,%.1f,%.2f\n",
+           "%d,%d,%.4f,%.2f,%.1f,%.2f,%.0f,%.0f,%.1f\n",
            mode_s, mode == M_SHARED ? warm : "-", nb, nthreads, nnodes,
            (double)file_size / (1 << 20), block, elapsed, gib_s, mops_s,
            local_before, local_after, setup_s,
@@ -943,6 +1204,6 @@ int main(int argc, char **argv)
            refreshes / elapsed / 1e6, retries / elapsed / 1e6,
            (unsigned long long)errors,
            hot_blocks ? hot_pct : 0, hot_blocks ? hot_access : 0, rep_frac,
-           disk_mb_s, majflt_s, limit);
+           disk_mb_s, majflt_s, limit, pro_s, rep_s, shift_secs);
     return 0;
 }

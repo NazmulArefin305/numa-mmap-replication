@@ -1,0 +1,9 @@
+# compiled programs
+code/numa_mmap_bench
+code/fault_cost
+*.o
+# large data and replica files (never commit these)
+*.bin
+# local clutter
+.DS_Store
+__pycache__/

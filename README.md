@@ -4,6 +4,8 @@ An OS course project extending **PaCaR** ("PaCaR: Improved Buffered I/O Locality
 
 ![What we tested](figures/experiment_diagram.png)
 
+![Experiment 6: adaptive replicas follow a moving hot set](figures/exp6_moving.png)
+
 ## Results (19 Nov 2026, CloudLab `c220g5`, 2 × Xeon Silver 4114)
 
 | Experiment | Question | Result |
@@ -14,6 +16,7 @@ An OS course project extending **PaCaR** ("PaCaR: Improved Buffered I/O Locality
 | 3. Unpinned threads | Does it survive when the scheduler places threads? | Yes: 1.40–1.49x, within 2% of pinned threads |
 | 4. Writes (main/twin rule) | How much survives once writes keep copies consistent? | Gain while writes are rare (1.46x at 99% reads), break-even at 87–90% reads, slower below; a write caught by a page fault costs 6.5–19.6 µs |
 | 5. Limited memory (limitation 2) | Does full replication fail when memory is short, and does replicating only hot data fix it? | Yes to both: full replicas fell to 8–17x slower than plain mmap once they no longer fitted (12 and 10 GiB limits), while replicating only the hot 10% kept 1.40x at every limit with a fifth of the extra memory |
+| 6. Automatic hot-page detection | Can the hot pages be found by counting reads, and does it follow the hot set when it moves? | Yes: 97% of the known-hot-set speed (1.36x over plain mmap) with no advance knowledge; learns in about 5 s; when the hot set moved, it recovered in 6 s while the fixed choice fell to plain-mmap speed. Tuning: a threshold of 3 is best; a larger area does not help; the remaining 3% gap is the cost of the replica lookup |
 
 Full details, tables and charts: [`docs/experiment-plan.md`](docs/experiment-plan.md). Day-by-day notes: [`docs/project-log.md`](docs/project-log.md).
 
@@ -44,6 +47,7 @@ sudo FILE=./data.bin ./run_exp1.sh    # experiment 1
 sudo FILE=./data.bin ./run_exp3.sh    # experiment 3
 sudo FILE=./data.bin ./run_exp4.sh    # experiment 4 (modifies data.bin)
 sudo FILE=./data8g.bin ./run_exp5.sh check && sudo FILE=./data8g.bin ./run_exp5.sh   # experiment 5
+sudo FILE=./data8g.bin REP=./rep_hot10_ ./run_exp6.sh          # experiment 6 (uses experiment 5's replica files)
 python3 summarize.py <results file>
 ```
 

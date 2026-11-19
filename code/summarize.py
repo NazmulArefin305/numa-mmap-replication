@@ -64,12 +64,17 @@ def main():
         def setting(r):
             if r["mode"] == "shared":
                 return "plain"
+            if r["mode"] == "adaptive":
+                return "adaptive"
             f = num(r.get("rep_frac")) or 0
             return "full" if f > 0.99 else f"hot{round(100 * f)}"
+        steady = [r for r in rows if (num(r.get("shift_s")) or 0) == 0
+                  and r.get("check_errors", "0") == "0" and (num(r.get("seconds")) or 0) >= 25]
         by = defaultdict(list)
-        for r in rows:
+        for r in steady:
             by[(round(num(r["mem_limit_gib"]) or -1), setting(r))].append(r)
-        names = ["plain", "full", "hot10", "hot25"]
+        present = {k[1] for k in by}
+        names = [n for n in ["plain", "full", "hot10", "hot25", "adaptive"] if n in present]
         print("\nThroughput (GiB/s), speed-up vs plain mmap, and disk reads (MB/s) per memory limit:")
         print("  limit  " + "  ".join(f"{n:>22}" for n in names))
         for lim in sorted({k[0] for k in by}, reverse=True):
@@ -85,6 +90,15 @@ def main():
                 su = f"{g / b:.2f}x" if b else "-"
                 cells.append(f"{g:7.2f} {su:>6} {dsk:6.0f}MB/s")
             print(f"  {lim:>3} GiB  " + "  ".join(cells))
+        moving = [r for r in rows if (num(r.get("shift_s")) or 0) > 0]
+        if moving:
+            print("\nMoving hot set (whole 60 s run; see the timeline files for before/after):")
+            mv = defaultdict(list)
+            for r in moving:
+                mv[setting(r)].append(r)
+            for n, rs in mv.items():
+                print(f"  {n:>9}: {mean(rs, 'gib_per_s'):.2f} GiB/s, "
+                      f"{mean(rs, 'promotions_per_s') or 0:.0f} promotions/s")
 
     # Experiment 4: speed-up of replicas over plain mmap, per read share
     if any(r.get("read_pct", "100") != "100" for r in rows):

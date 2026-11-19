@@ -1,0 +1,5 @@
+mode,warm,numa_balancing,threads,nodes,file_mb,block,seconds,gib_per_s,mops_per_s,local_before,local_after,setup_s,pinned,read_pct,writable,sampled_local,node_changes_per_thread_s,refreshes_per_s,retries_per_s,check_errors,hot_pct,hot_access_pct,rep_frac,disk_read_mb_s,majflt_per_s,mem_limit_gib,promotions_per_s,replacements_per_s,shift_s,threshold
+adaptive,-,0,40,2,8192,4096,30.00,80.7086,21.1573,-1.0000,-1.0000,32.37,yes,100,0,0.9357,0.0000,0.0000,0.0000,0,10,90,0.1000,0.00,0.0,12.00,9495,9495,0.0,2
+adaptive,-,0,40,2,8192,4096,30.00,80.7206,21.1604,-1.0000,-1.0000,32.44,yes,100,0,0.9355,0.0000,0.0000,0.0000,0,10,90,0.1000,0.00,0.0,12.00,9447,9447,0.0,2
+adaptive,-,0,40,2,8192,4096,30.00,81.0076,21.2357,-1.0000,-1.0000,32.51,yes,100,0,0.9344,0.0000,0.0000,0.0000,0,10,90,0.1000,0.00,0.0,12.00,144,144,0.0,3
+adaptive,-,0,40,2,8192,4096,30.00,81.0259,21.2405,-1.0000,-1.0000,32.49,yes,100,0,0.9346,0.0000,0.0000,0.0000,0,10,90,0.1000,0.00,0.0,12.00,140,140,0.0,3
