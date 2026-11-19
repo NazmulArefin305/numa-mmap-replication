@@ -337,6 +337,26 @@ This experiment tests PaCaR's second limitation and the fix the paper proposes f
 
 **Time.** About 45 minutes to write the code, then about 45 minutes on the machine; the CloudLab experiment is extended past its 21:33 expiry.
 
+### Result (19 Nov, 19:20–20:10, `run_exp5.sh`)
+
+Limitation 2 is real and the paper's proposed fix works. Full replicas collapsed to 8–17 times slower than plain mmap once they no longer fit in memory, while replicas of only the hot 10% kept a 1.40x gain at every limit. H5a and H5c hold; H5b holds from 12 GiB down, but not at 16 GiB, where full replicas still just fitted.
+
+![Experiment 5: throughput per memory limit](../figures/exp5_memory.png)
+
+| Memory limit | Plain mmap (GiB/s) | Full replicas | Hot 10% replicas | Hot 25% replicas |
+| --- | --- | --- | --- | --- |
+| 24 GiB | 59.52 | 88.37 (1.48x) | 83.52 (1.40x) | 84.41 (1.42x) |
+| 16 GiB | 59.52 | 87.00 (1.46x), disk 61 MB/s | 83.50 (1.40x) | 84.41 (1.42x) |
+| 12 GiB | 59.52 | 7.17 (0.12x), disk 275 MB/s | 83.51 (1.40x) | 84.42 (1.42x) |
+| 10 GiB | 59.52 | 3.60 (0.06x), disk 276 MB/s | 83.54 (1.40x) | 83.49 (1.40x), disk 38 MB/s |
+
+Speed-ups are against plain mmap at the same limit; each value is the mean of 2 runs of 30 s after a 10 s warm-up. Disk reads are shown only where they were above zero.
+
+- **Plain mmap was unaffected** by every limit, since its single 8 GiB copy always fitted.
+- **Full replicas need twice the memory, and the cliff is steep.** At 16 GiB, exactly their size, they still ran at 1.46x with a trickle of disk reads, because the hot data stayed cached. At 12 GiB the evicted cold pages had to come back from the SSD, which levelled off at about 275 MB/s (about 67,000 reads of 4 KiB per second) and capped the whole program.
+- **Replicating only the hot part keeps most of the gain for a fraction of the memory.** The hot 10% replicas used 1.6 GiB of extra memory instead of 8 GiB and kept 83% of full replication's gain (1.40x against 1.48x when everything fits). The hot 25% version was slightly faster but began touching the disk at 10 GiB.
+- **This is an upper bound for selective replication.** The hot blocks were known in advance; a real system such as PaCaR would have to discover them by counting accesses, which costs time and memory and may pick the wrong pages when the pattern shifts.
+
 ## How each experiment bears on PaCaR
 
 Together the experiments move the project from "replicas help in one setting" to three claims about PaCaR: its mmap limitation is costly, its NUMA-balancing reassurance does not hold for shared data, and its proposed mmap design has a measurable price. Every outcome is reportable, including the ones that go against the hypotheses.

@@ -4,7 +4,7 @@ An OS course project extending **PaCaR** ("PaCaR: Improved Buffered I/O Locality
 
 ![What we tested](figures/experiment_diagram.png)
 
-## Results so far (19 Nov 2026, CloudLab `c220g5`, 2 × Xeon Silver 4114)
+## Results (19 Nov 2026, CloudLab `c220g5`, 2 × Xeon Silver 4114)
 
 | Experiment | Question | Result |
 |---|---|---|
@@ -13,7 +13,7 @@ An OS course project extending **PaCaR** ("PaCaR: Improved Buffered I/O Locality
 | 2. 8 GiB file | Does the gain depend on file size? | No: 1.36–1.54x with a four times larger file |
 | 3. Unpinned threads | Does it survive when the scheduler places threads? | Yes: 1.40–1.49x, within 2% of pinned threads |
 | 4. Writes (main/twin rule) | How much survives once writes keep copies consistent? | Gain while writes are rare (1.46x at 99% reads), break-even at 87–90% reads, slower below; a write caught by a page fault costs 6.5–19.6 µs |
-| 5. Limited memory (limitation 2) | Does full replication fail when memory is short, and does replicating only hot data fix it? | Running |
+| 5. Limited memory (limitation 2) | Does full replication fail when memory is short, and does replicating only hot data fix it? | Yes to both: full replicas fell to 8–17x slower than plain mmap once they no longer fitted (12 and 10 GiB limits), while replicating only the hot 10% kept 1.40x at every limit with a fifth of the extra memory |
 
 Full details, tables and charts: [`docs/experiment-plan.md`](docs/experiment-plan.md). Day-by-day notes: [`docs/project-log.md`](docs/project-log.md).
 

@@ -1,0 +1,4 @@
+numa_pte_updates 463
+numa_hint_faults 464
+numa_hint_faults_local 316
+numa_pages_migrated 104

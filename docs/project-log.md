@@ -71,7 +71,7 @@ Machine: 2 × Xeon Silver 4114, 2 NUMA nodes (node0 CPUs 0-9,20-29; node1 10-19,
 
 Headline: replicas 1.35-1.49x faster than best mmap at every thread count (86.7 vs 58.3 GiB/s at 40 threads); local accesses 100% vs 50%; NUMA balancing changed throughput by <1%; baselines plateau from 16 threads.
 
-Files: `results.csv`, `results.png` (on the Mac; `results.png` also embedded in the Experiment Plan doc), `experiment_diagram.png` (sent in chat: panel A baseline split file + busy cross-socket link; panel B one full replica per node, link unused; strip listing all 4 settings).
+Files: `results.csv`, `results.png` (on the Mac; `results.png` also embedded in the Experiment Plan doc), `experiment_diagram.png` (in `figures/`: panel A baseline split file + busy cross-socket link; panel B one full replica per node, link unused; strip listing all 4 settings).
 
 ### Machine configuration (from `sysinfo.txt`, 19 Nov)
 
@@ -142,7 +142,7 @@ Correctness check: 50% writes, 40 threads, 10 s, 2.4M twin refreshes/s → 0 tor
 | 65% | 0.73x | 0.77x | 65.5% | 2.69 |
 | 50% | 0.73x | 0.78x | 58.3% | 2.45 |
 
-Speed-up = replica ops/s ÷ plain mmap ops/s, same mix; 3 × 20 s; spread <2.5%. Crossover 87-90% reads (interpolated 89.8% at 16 thr, 86.5% at 40), vs PaCaR's 65%. Protocol overhead at 100% reads vs read-only replicas (run 1): 5.3% (16 thr), 2.9% (40 thr). Likely reason for early crossover (not measured): each write stales both twins, next read per socket pays remote read + 4 KiB copy; with mmap an op is only a memory copy, whereas read()/write() in PaCaR add a syscall that hides this cost. Chart `exp4_speedup.png` (sent in chat, embedded in Experiment Plan).
+Speed-up = replica ops/s ÷ plain mmap ops/s, same mix; 3 × 20 s; spread <2.5%. Crossover 87-90% reads (interpolated 89.8% at 16 thr, 86.5% at 40), vs PaCaR's 65%. Protocol overhead at 100% reads vs read-only replicas (run 1): 5.3% (16 thr), 2.9% (40 thr). Likely reason for early crossover (not measured): each write stales both twins, next read per socket pays remote read + 4 KiB copy; with mmap an op is only a memory copy, whereas read()/write() in PaCaR add a syscall that hides this cost. Chart `exp4_speedup.png` (in `figures/`).
 
 Fault cost (`fault_cost`): plain write 33 / 98 / 74 ns; write to protected page 6.5 / 12.0 / 19.6 µs; re-protect one page 2.4 / 7.8 / 14.4 µs, with 0 / 19 / 39 other threads. 120-270x a plain write; grows with threads (TLB shootdowns). At 40 threads one protect+fault cycle ≈ 34 µs → ~1.2M such writes/s for all threads, vs ~3.7M writes/s the user-space replicas did at 50% reads. A transparent design needs most writes not to fault (e.g. leave hot written pages unreplicated).
 
@@ -151,6 +151,19 @@ Hypotheses: H4a holds, H4b partly (crossover exists but at 87-90%, not 50-75%), 
 ## 7e. Experiment 5 (planned 19 Nov evening): limited memory, PaCaR limitation 2
 
 Plan in the Experiment Plan doc ("Experiment 5: limited memory"). Code `numa-mmap-replica-v3.zip` (unpacks to `~/numa-mmap-replica-v3`): new mode `-m filerep -R PREFIX` (replicas as evictable files, a shorter replica file replicates only the hot first part), `-k 10:90` hot/cold reads, `-A` no read-ahead, `-D` warm-up; reports disk MB/s, major faults/s, cgroup memory limit. Script `run_exp5.sh` (`check` mode first): 8 GiB `data8g.bin`, 40 threads, settings plain / full / hot10 / hot25 under `systemd-run` MemoryMax 24, 16, 12, 10 GiB, page cache dropped before each run, 2 reps × 30 s after 10 s warm-up. Needs ~22 GiB disk for replica files. Hypotheses: H5a all fit at 24 GiB, full wins; H5b full falls behind plain at ≤16 GiB (disk reads); H5c selective fits to 10 GiB and keeps most of the gain. Hot set known in advance (upper bound for selective replication). User asked to Extend the CloudLab experiment past 21:33.
+
+Check run (19:15): plain at 24 GiB 59.5 GiB/s, no disk; full at 10 GiB 4.07 GiB/s with disk reads; cgroup limit confirmed (10.00 GiB).
+
+Result (19:20-20:10, `results_exp5.csv`; chart `exp5_memory.png`):
+
+| Limit | Plain | Full | Hot 10% | Hot 25% |
+|---|---|---|---|---|
+| 24 GiB | 59.52 | 88.37 (1.48x) | 83.52 (1.40x) | 84.41 (1.42x) |
+| 16 GiB | 59.52 | 87.00 (1.46x), disk 61 MB/s | 83.50 (1.40x) | 84.41 (1.42x) |
+| 12 GiB | 59.52 | 7.17 (0.12x), disk 275 MB/s | 83.51 (1.40x) | 84.42 (1.42x) |
+| 10 GiB | 59.52 | 3.60 (0.06x), disk 276 MB/s | 83.54 (1.40x) | 83.49 (1.40x), disk 38 MB/s |
+
+GiB/s, mean of 2 × 30 s after 10 s warm-up. H5a holds; H5b holds from 12 GiB (not at 16 GiB, where full replicas just fit); H5c holds. SSD plateau ~275 MB/s (~67k 4 KiB reads/s) caps full replicas. Hot-10% replicas: 1.6 GiB extra instead of 8 GiB, 83% of full replication's gain. Upper bound: hot set known in advance.
 
 ## 8. Interpretation and conclusion (from run 1)
 
