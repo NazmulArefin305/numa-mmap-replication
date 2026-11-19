@@ -1,0 +1,140 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  body { margin:0; background:#ffffff; font-family: "Helvetica Neue", Arial, sans-serif; }
+  svg text { font-family: "Helvetica Neue", Arial, sans-serif; fill:#1f1f1e; }
+  .h1 { font-size:22px; font-weight:700; }
+  .h2 { font-size:17px; font-weight:700; }
+  .lbl { font-size:13px; }
+  .sm { font-size:12px; fill:#55544e; }
+  .big { font-size:26px; font-weight:700; }
+  .mono { font-family: Menlo, Consolas, monospace; font-size:12px; }
+</style></head>
+<body>
+<svg id="d" xmlns="http://www.w3.org/2000/svg" width="1200" height="775" viewBox="0 0 1200 775">
+  <defs>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c4501f"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1c5cab"/></marker>
+    <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#fde3d6"/><line x1="0" y1="0" x2="0" y2="6" stroke="#eb6834" stroke-width="2"/>
+    </pattern>
+  </defs>
+
+  <text x="600" y="38" text-anchor="middle" class="h1">What we tested: reading one memory-mapped file from both CPU sockets</text>
+  <text x="600" y="62" text-anchor="middle" class="sm">One CloudLab c220g5 server · 2 × Intel Xeon Silver 4114 (2 NUMA nodes, 40 CPUs) · 2 GiB file · random 4 KiB reads · 2–40 threads, split evenly over both sockets</text>
+
+  <!-- ============ LEFT: baseline ============ -->
+  <g transform="translate(30,90)">
+    <rect x="0" y="0" width="555" height="470" rx="12" fill="#fbfaf7" stroke="#e4e3dd"/>
+    <text x="24" y="34" class="h2">A. Baseline: plain mmap (stock Linux)</text>
+    <text x="24" y="56" class="sm">One copy of the file; its pages are split between the two nodes</text>
+
+    <!-- node 0 -->
+    <rect x="24" y="78" width="225" height="250" rx="10" fill="#ffffff" stroke="#b8b7ae"/>
+    <text x="136" y="100" text-anchor="middle" class="lbl" font-weight="700">NUMA node 0</text>
+    <rect x="44" y="112" width="185" height="60" rx="8" fill="#eceae4"/>
+    <text x="136" y="138" text-anchor="middle" class="lbl">Socket 0 · 20 threads</text>
+    <text x="136" y="157" text-anchor="middle" class="sm">CPUs 0–9, 20–29</text>
+    <rect x="44" y="230" width="185" height="88" rx="8" fill="#f4f3ef" stroke="#d4d3cc"/>
+    <text x="136" y="304" text-anchor="middle" class="sm">Memory 0</text>
+    <rect x="62" y="240" width="150" height="34" rx="5" fill="url(#hatch)" stroke="#eb6834"/>
+    <text x="137" y="262" text-anchor="middle" class="lbl" font-weight="700">file half A</text>
+
+    <!-- node 1 -->
+    <rect x="306" y="78" width="225" height="250" rx="10" fill="#ffffff" stroke="#b8b7ae"/>
+    <text x="418" y="100" text-anchor="middle" class="lbl" font-weight="700">NUMA node 1</text>
+    <rect x="326" y="112" width="185" height="60" rx="8" fill="#eceae4"/>
+    <text x="418" y="138" text-anchor="middle" class="lbl">Socket 1 · 20 threads</text>
+    <text x="418" y="157" text-anchor="middle" class="sm">CPUs 10–19, 30–39</text>
+    <rect x="326" y="230" width="185" height="88" rx="8" fill="#f4f3ef" stroke="#d4d3cc"/>
+    <text x="418" y="304" text-anchor="middle" class="sm">Memory 1</text>
+    <rect x="344" y="240" width="150" height="34" rx="5" fill="url(#hatch)" stroke="#eb6834"/>
+    <text x="419" y="262" text-anchor="middle" class="lbl" font-weight="700">file half B</text>
+
+    <!-- local reads -->
+    <line x1="100" y1="172" x2="100" y2="238" stroke="#c4501f" stroke-width="2.5" marker-end="url(#ao)"/>
+    <text x="92" y="208" text-anchor="end" class="sm">local</text>
+    <line x1="470" y1="172" x2="470" y2="238" stroke="#c4501f" stroke-width="2.5" marker-end="url(#ao)"/>
+    <text x="478" y="208" class="sm">local</text>
+    <!-- remote reads, crossing -->
+    <path d="M190,172 C240,200 300,215 360,238" fill="none" stroke="#c4501f" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#ao)"/>
+    <path d="M366,172 C316,200 256,215 196,238" fill="none" stroke="#c4501f" stroke-width="2.5" stroke-dasharray="7 5" marker-end="url(#ao)"/>
+    <!-- interconnect -->
+    <rect x="249" y="340" width="57" height="20" rx="4" fill="#eb6834"/>
+    <line x1="136" y1="350" x2="249" y2="350" stroke="#eb6834" stroke-width="3"/>
+    <line x1="306" y1="350" x2="418" y2="350" stroke="#eb6834" stroke-width="3"/>
+    <line x1="136" y1="328" x2="136" y2="350" stroke="#eb6834" stroke-width="3"/>
+    <line x1="418" y1="328" x2="418" y2="350" stroke="#eb6834" stroke-width="3"/>
+    <text x="277" y="380" text-anchor="middle" class="sm">cross-socket link (UPI): busy, the bottleneck</text>
+    <text x="277" y="190" text-anchor="middle" class="sm" style="fill:#c4501f">remote</text>
+
+    <!-- result -->
+    <line x1="24" y1="398" x2="531" y2="398" stroke="#e4e3dd"/>
+    <text x="24" y="428" class="lbl">Local accesses</text>
+    <text x="24" y="456" class="big">50%</text>
+    <text x="200" y="428" class="lbl">Throughput, 40 threads</text>
+    <text x="200" y="456" class="big">58.3 GiB/s</text>
+    <text x="400" y="428" class="lbl">Memory used</text>
+    <text x="400" y="456" class="big">1 × file</text>
+  </g>
+
+  <!-- ============ RIGHT: replicas ============ -->
+  <g transform="translate(615,90)">
+    <rect x="0" y="0" width="555" height="470" rx="12" fill="#f6f9fe" stroke="#cde2fb"/>
+    <text x="24" y="34" class="h2">B. This work: one replica per NUMA node</text>
+    <text x="24" y="56" class="sm">A full copy of the file is placed in each node's memory</text>
+
+    <rect x="24" y="78" width="225" height="250" rx="10" fill="#ffffff" stroke="#9ec5f4"/>
+    <text x="136" y="100" text-anchor="middle" class="lbl" font-weight="700">NUMA node 0</text>
+    <rect x="44" y="112" width="185" height="60" rx="8" fill="#e8f0fb"/>
+    <text x="136" y="138" text-anchor="middle" class="lbl">Socket 0 · 20 threads</text>
+    <text x="136" y="157" text-anchor="middle" class="sm">CPUs 0–9, 20–29</text>
+    <rect x="44" y="230" width="185" height="88" rx="8" fill="#f4f7fc" stroke="#b7d3f6"/>
+    <text x="136" y="304" text-anchor="middle" class="sm">Memory 0</text>
+    <rect x="62" y="240" width="150" height="34" rx="5" fill="#2a78d6"/>
+    <text x="137" y="262" text-anchor="middle" class="lbl" font-weight="700" style="fill:#ffffff">whole file (replica 0)</text>
+
+    <rect x="306" y="78" width="225" height="250" rx="10" fill="#ffffff" stroke="#9ec5f4"/>
+    <text x="418" y="100" text-anchor="middle" class="lbl" font-weight="700">NUMA node 1</text>
+    <rect x="326" y="112" width="185" height="60" rx="8" fill="#e8f0fb"/>
+    <text x="418" y="138" text-anchor="middle" class="lbl">Socket 1 · 20 threads</text>
+    <text x="418" y="157" text-anchor="middle" class="sm">CPUs 10–19, 30–39</text>
+    <rect x="326" y="230" width="185" height="88" rx="8" fill="#f4f7fc" stroke="#b7d3f6"/>
+    <text x="418" y="304" text-anchor="middle" class="sm">Memory 1</text>
+    <rect x="344" y="240" width="150" height="34" rx="5" fill="#2a78d6"/>
+    <text x="419" y="262" text-anchor="middle" class="lbl" font-weight="700" style="fill:#ffffff">whole file (replica 1)</text>
+
+    <line x1="136" y1="172" x2="136" y2="238" stroke="#1c5cab" stroke-width="3" marker-end="url(#ab)"/>
+    <text x="146" y="214" class="sm">all reads local</text>
+    <line x1="418" y1="172" x2="418" y2="238" stroke="#1c5cab" stroke-width="3" marker-end="url(#ab)"/>
+    <text x="428" y="214" class="sm">all reads local</text>
+
+    <rect x="249" y="340" width="57" height="20" rx="4" fill="#d4d3cc"/>
+    <line x1="136" y1="350" x2="249" y2="350" stroke="#d4d3cc" stroke-width="3"/>
+    <line x1="306" y1="350" x2="418" y2="350" stroke="#d4d3cc" stroke-width="3"/>
+    <line x1="136" y1="328" x2="136" y2="350" stroke="#d4d3cc" stroke-width="3"/>
+    <line x1="418" y1="328" x2="418" y2="350" stroke="#d4d3cc" stroke-width="3"/>
+    <text x="277" y="380" text-anchor="middle" class="sm">cross-socket link: unused by reads</text>
+
+    <line x1="24" y1="398" x2="531" y2="398" stroke="#cde2fb"/>
+    <text x="24" y="428" class="lbl">Local accesses</text>
+    <text x="24" y="456" class="big" style="fill:#1c5cab">100%</text>
+    <text x="200" y="428" class="lbl">Throughput, 40 threads</text>
+    <text x="200" y="456" class="big" style="fill:#1c5cab">86.7 GiB/s</text>
+    <text x="400" y="428" class="lbl">Memory used</text>
+    <text x="400" y="456" class="big">2 × file</text>
+  </g>
+
+  <!-- ============ bottom: what was compared ============ -->
+  <g transform="translate(30,585)">
+    <rect x="0" y="0" width="1140" height="165" rx="12" fill="#ffffff" stroke="#e4e3dd"/>
+    <text x="24" y="32" class="h2">Four settings measured (3 runs each, 20 s per run)</text>
+    <g class="lbl">
+      <rect x="24" y="52" width="14" height="14" rx="3" fill="#eb6834"/><text x="46" y="64">mmap, pages spread over nodes (diagram A)</text><text x="420" y="64">58.3 GiB/s</text><text x="540" y="64">50% local</text>
+      <rect x="24" y="78" width="14" height="14" rx="3" fill="#1baf7a"/><text x="46" y="90">mmap, spread + Linux NUMA balancing on</text><text x="420" y="90">58.3 GiB/s</text><text x="540" y="90">50% local</text><text x="650" y="90" class="sm">no measurable effect (&lt;1%)</text>
+      <rect x="24" y="104" width="14" height="14" rx="3" fill="#eda100"/><text x="46" y="116">mmap, all pages on one node</text><text x="420" y="116">41.6 GiB/s</text><text x="540" y="116">50% local</text><text x="650" y="116" class="sm">node 1 fully remote; one memory serves all</text>
+      <rect x="24" y="130" width="14" height="14" rx="3" fill="#2a78d6"/><text x="46" y="142" font-weight="700">Per-node replicas (diagram B)</text><text x="420" y="142" font-weight="700">86.7 GiB/s</text><text x="540" y="142" font-weight="700">100% local</text><text x="650" y="142" font-weight="700" style="fill:#1c5cab">1.35–1.49× faster than best mmap, at every thread count</text>
+    </g>
+  </g>
+</svg>
+</body></html>

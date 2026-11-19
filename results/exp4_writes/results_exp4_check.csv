@@ -1,0 +1,2 @@
+mode,warm,numa_balancing,threads,nodes,file_mb,block,seconds,gib_per_s,mops_per_s,local_before,local_after,setup_s,pinned,read_pct,writable,sampled_local,node_changes_per_thread_s,refreshes_per_s,retries_per_s,check_errors
+replica,-,0,40,2,2048,4096,10.00,27.9908,7.3376,-1.0000,-1.0000,9.28,yes,50,1,0.5876,0.0000,2.4223,0.0001,0
